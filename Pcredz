@@ -1,4 +1,23 @@
 #!/usr/bin/env python3
+import os
+import sys
+import logging
+import argparse
+import re
+import socket
+import struct
+import subprocess
+import threading
+import time
+import codecs
+from base64 import b64decode
+from threading import Thread
+import requests
+import datetime
+import syslog
+# Dashboard/HTTP API integration config
+DASHBOARD_URL = os.environ.get('PCREDZ_DASHBOARD_URL', 'http://127.0.0.1:5000/api/creds')
+ENABLE_DASHBOARD = os.environ.get('PCREDZ_ENABLE_DASHBOARD', '1') == '1'
 # Pcredz 2.0.2
 # Created by Laurent Gaffie
 #
@@ -13,8 +32,21 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+import os
 import sys
+import logging
+import argparse
+import re
+import socket
+import struct
+import subprocess
+import threading
+import time
+import codecs
+from base64 import b64decode
+from threading import Thread
+
 if (sys.version_info > (3, 0)):
 	PY2OR3     = "PY3"
 else:
@@ -25,19 +57,6 @@ try:
 except ImportError:
 	print("libpcap not installed.\ntry : apt install python3-pip && sudo apt-get install libpcap-dev && pip3 install Cython && pip3 install python-libpcap")
 	exit()
-
-import logging
-import argparse
-import os
-import re
-import socket
-import struct
-import subprocess
-import threading
-import time
-import codecs
-from base64 import b64decode
-from threading import Thread
 
 PcredzVersion='2.0.3'
 
@@ -80,9 +99,21 @@ l.addHandler(logging.FileHandler(Filename,'a'))
 
 # Function used to write captured hashs to a file.
 def WriteData(outfile, data, user):
+	# Send to dashboard HTTP API if enabled
+	if ENABLE_DASHBOARD:
+		try:
+			requests.post(DASHBOARD_URL, json={
+				'cred': data,
+				'time': datetime.datetime.now().isoformat()
+			})
+		except Exception as e:
+			pass  # Don't break on dashboard errors
 	outfile = PcredzPath+outfile
 	if type(user) is str:
 		user = user.encode('latin-1')
+	# Send to syslog for SIEM integration
+	syslog.openlog(ident="PCredz", logoption=syslog.LOG_PID)
+	syslog.syslog(syslog.LOG_INFO, f"PCredz event: {data}")
 	if not os.path.isfile(outfile):
 		if not os.path.isdir(os.path.dirname(outfile)):
 			os.makedirs(os.path.dirname(outfile))
@@ -171,8 +202,9 @@ def ParseCTX1Hash(data):
 		return pc
 
 	x = re.sub('[^A-P]', '', data.upper())
-	WriteData("logs/CTX1-Plaintext.txt", Message, Message)
-	return str(decrypt(x))
+	plaintext = str(decrypt(x))
+	WriteData("logs/CTX1-Plaintext.txt", plaintext, plaintext)
+	return plaintext
 
 def ParseNTLMHash(data,Challenge):
 	PacketLen = len(data)
@@ -699,29 +731,31 @@ def Print_Packet_800dot11(pktlen, timestamp, data):
 		ParseDataRegex(decoded, SrcPort, DstPort)
 
 def Print_Packet_Tcpdump(pktlen, timestamp, data):
-	if not data:
-		return
-	if data[12:14]== b'\x08\x00':
-		decoded= Decode_Ip_Packet(data[14:])
-		if len(decoded['data']) >= 2:
-			SrcPort= struct.unpack('>H',decoded['data'][0:2])[0]
-		else:
-			SrcPort = 0
-		if len(decoded['data']) > 2:
-			DstPort = struct.unpack('>H',decoded['data'][2:4])[0]
-		else:
-			DstPort = 0
-		ParseDataRegex(decoded, SrcPort, DstPort)
+		if not data:
+			return
+		if data[12:14] == b'\x08\x00':
+			decoded = Decode_Ip_Packet(data[14:])
+			if len(decoded['data']) >= 2:
+				SrcPort = struct.unpack('>H', decoded['data'][0:2])[0]
+			else:
+				SrcPort = 0
+			if len(decoded['data']) > 2:
+				DstPort = struct.unpack('>H', decoded['data'][2:4])[0]
+			else:
+				DstPort = 0
+			ParseDataRegex(decoded, SrcPort, DstPort)
 
-	if data[12:14]== b'\x86\xdd':
-		decoded= Decode_Ipv6_Packet(data[14:])
-		if len(decoded['data']) >= 2:
-			SrcPort= struct.unpack('>H',decoded['data'][0:2])[0]
-		else:
- 			SrcPort = 0
-		if len(decoded['data']) > 2:
-			DstPort = struct.unpack('>H',decoded['data'][2:4])[0]
-		ParseDataRegex(decoded, SrcPort, DstPort)
+		if data[12:14] == b'\x86\xdd':
+			decoded = Decode_Ipv6_Packet(data[14:])
+			if len(decoded['data']) >= 2:
+				SrcPort = struct.unpack('>H', decoded['data'][0:2])[0]
+			else:
+				SrcPort = 0
+			if len(decoded['data']) > 2:
+				DstPort = struct.unpack('>H', decoded['data'][2:4])[0]
+			else:
+				DstPort = 0
+			ParseDataRegex(decoded, SrcPort, DstPort)
 
 def loop_packets(pcap_object, func):
 	for x in pcap_object:
